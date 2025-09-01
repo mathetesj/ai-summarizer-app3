@@ -575,10 +575,24 @@
             try {
                 updateStatus('🎵 오디오 디코딩 중...', true);
                 
+                // M4A 파일의 경우 압축 대신 청킹만 진행
+                if (fileName.toLowerCase().endsWith('.m4a')) {
+                    console.log('M4A 파일은 압축하지 않고 원본 유지');
+                    return audioBlob; // M4A는 이미 압축된 형식이므로 그대로 반환
+                }
+                
                 // AudioContext로 디코딩
                 const audioContext = new (window.AudioContext || window.webkitAudioContext)();
                 const arrayBuffer = await audioBlob.arrayBuffer();
-                const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                
+                let audioBuffer;
+                try {
+                    audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                } catch (decodeError) {
+                    console.error('오디오 디코딩 실패:', decodeError);
+                    // 디코딩 실패 시 원본 반환
+                    return audioBlob;
+                }
                 
                 // 압축 설정 계산
                 const originalSampleRate = audioBuffer.sampleRate;
@@ -612,9 +626,6 @@
                 // WAV로 변환 (압축된 포맷)
                 const wavBlob = audioBufferToWav(renderedBuffer, targetSampleRate);
                 
-                // MP3로 추가 압축 시도 (lamejs 사용하지 않고 WAV 유지)
-                // Whisper API는 WAV를 잘 처리하므로 WAV 유지
-                
                 return wavBlob;
                 
             } catch (error) {
@@ -626,6 +637,12 @@
         // ========== 대용량 파일 청킹 처리 ==========
         async function processLargeAudioInChunks(audioBlob, fileName) {
             try {
+                // M4A 파일은 직접 분할 업로드
+                if (fileName.toLowerCase().endsWith('.m4a')) {
+                    return await processM4AInChunks(audioBlob, fileName);
+                }
+                
+                // 다른 형식은 기존 방식으로 처리
                 const audioContext = new (window.AudioContext || window.webkitAudioContext)();
                 const arrayBuffer = await audioBlob.arrayBuffer();
                 const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
@@ -696,6 +713,57 @@
                 console.error('청킹 처리 실패:', error);
                 throw new Error('대용량 파일 처리 중 오류가 발생했습니다.');
             }
+        }
+
+        // ========== M4A 파일 청킹 처리 ==========
+        async function processM4AInChunks(audioBlob, fileName) {
+            const CHUNK_SIZE = 24 * 1024 * 1024; // 24MB per chunk
+            const totalSize = audioBlob.size;
+            const numChunks = Math.ceil(totalSize / CHUNK_SIZE);
+            let combinedTranscript = "";
+            
+            updateStatus(`🔪 M4A 파일을 ${numChunks}개 부분으로 나누어 처리합니다...`, true);
+            
+            for (let i = 0; i < numChunks; i++) {
+                const start = i * CHUNK_SIZE;
+                const end = Math.min(start + CHUNK_SIZE, totalSize);
+                const chunkProgress = 30 + (40 * (i / numChunks));
+                
+                showProgress(chunkProgress, `청크 ${i + 1}/${numChunks} 처리 중...`);
+                updateStatus(`📝 파트 ${i + 1}/${numChunks} 전사 중... (${(start/1024/1024).toFixed(1)}MB - ${(end/1024/1024).toFixed(1)}MB)`, true);
+                
+                // Blob 슬라이싱으로 청크 생성
+                const chunkBlob = audioBlob.slice(start, end, 'audio/m4a');
+                const chunkFileName = `${fileName.replace('.m4a', '')}_part${i + 1}.m4a`;
+                
+                try {
+                    // 각 청크를 개별 M4A 파일로 처리
+                    const chunkTranscript = await transcribeWithWhisper(chunkBlob, chunkFileName);
+                    
+                    if (chunkTranscript && chunkTranscript.trim()) {
+                        combinedTranscript += chunkTranscript + " ";
+                        updateStatus(`✅ 파트 ${i + 1}/${numChunks} 완료`, false);
+                    }
+                    
+                    // API 제한 방지를 위한 딜레이
+                    if (i < numChunks - 1) {
+                        await new Promise(resolve => setTimeout(resolve, 1500));
+                    }
+                    
+                } catch (error) {
+                    console.error(`M4A 청크 ${i + 1} 처리 실패:`, error);
+                    
+                    // M4A 청킹이 실패하면 전체 파일로 재시도
+                    if (i === 0 && numChunks === 1) {
+                        updateStatus('⚠️ M4A 분할 실패, 전체 파일로 시도 중...', true);
+                        return await transcribeWithWhisper(audioBlob, fileName);
+                    }
+                    
+                    updateStatus(`⚠️ 파트 ${i + 1}/${numChunks} 건너뜀`, false);
+                }
+            }
+            
+            return combinedTranscript.trim();
         }
 
         // ========== 오디오 청크 추출 ==========
@@ -787,21 +855,61 @@
 
             const formData = new FormData();
             
-            // 파일 확장자에 따른 적절한 MIME 타입 설정
-            let mimeType = audioBlob.type || 'audio/mpeg';
-            if (fileName.toLowerCase().endsWith('.m4a')) {
-                mimeType = 'audio/mp4';
-            } else if (fileName.toLowerCase().endsWith('.mp3')) {
+            // 파일명 및 확장자 처리
+            let processedFileName = fileName;
+            let mimeType = audioBlob.type;
+            
+            // M4A 파일 특별 처리
+            if (fileName.toLowerCase().endsWith('.m4a') || 
+                audioBlob.type === 'audio/x-m4a' || 
+                audioBlob.type === 'audio/mp4a-latm' ||
+                audioBlob.type === 'audio/m4a' ||
+                audioBlob.type === '') {  // 빈 MIME 타입 처리
+                
+                // M4A는 명시적으로 .m4a 확장자와 audio/m4a MIME 타입 사용
+                processedFileName = fileName.toLowerCase().endsWith('.m4a') 
+                    ? fileName 
+                    : fileName.replace(/\.[^/.]+$/, '') + '.m4a';
+                mimeType = 'audio/m4a';
+                
+                console.log('M4A 파일 감지:', {
+                    originalName: fileName,
+                    processedName: processedFileName,
+                    originalType: audioBlob.type,
+                    processedType: mimeType,
+                    size: (audioBlob.size / 1024 / 1024).toFixed(2) + 'MB'
+                });
+            }
+            // 다른 파일 형식 처리
+            else if (fileName.toLowerCase().endsWith('.mp3')) {
                 mimeType = 'audio/mpeg';
+                processedFileName = fileName;
             } else if (fileName.toLowerCase().endsWith('.wav')) {
                 mimeType = 'audio/wav';
+                processedFileName = fileName;
             } else if (fileName.toLowerCase().endsWith('.webm')) {
                 mimeType = 'audio/webm';
+                processedFileName = fileName;
+            } else if (fileName.toLowerCase().endsWith('.ogg') || fileName.toLowerCase().endsWith('.oga')) {
+                mimeType = 'audio/ogg';
+                processedFileName = fileName;
+            } else if (fileName.toLowerCase().endsWith('.flac')) {
+                mimeType = 'audio/flac';
+                processedFileName = fileName;
             }
-
-            // Blob 생성 시 올바른 MIME 타입 사용
-            const processedBlob = new Blob([audioBlob], { type: mimeType });
-            formData.append('file', processedBlob, fileName);
+            
+            // Blob 재생성 - 올바른 MIME 타입으로
+            let processedBlob;
+            if (audioBlob instanceof File) {
+                // File 객체인 경우 새 File 생성
+                processedBlob = new File([audioBlob], processedFileName, { type: mimeType });
+            } else {
+                // Blob인 경우 그대로 사용하되 파일명 지정
+                processedBlob = new Blob([audioBlob], { type: mimeType });
+            }
+            
+            // FormData에 파일 추가
+            formData.append('file', processedBlob, processedFileName);
             formData.append('model', 'whisper-1');
             
             // 언어 설정
@@ -811,8 +919,18 @@
             }
             
             formData.append('response_format', 'json');
+            
+            // 타임스탬프 옵션 추가 (긴 오디오의 경우 유용)
+            formData.append('timestamp_granularities', 'segment');
 
             try {
+                console.log('Whisper API 호출 시작:', {
+                    fileName: processedFileName,
+                    fileSize: (processedBlob.size / 1024 / 1024).toFixed(2) + 'MB',
+                    mimeType: mimeType,
+                    language: language || 'auto'
+                });
+
                 const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
                     method: 'POST',
                     headers: {
@@ -821,21 +939,51 @@
                     body: formData
                 });
 
+                const responseText = await response.text();
+                
                 if (!response.ok) {
-                    const errorData = await response.json().catch(() => ({ error: { message: 'Unknown error' } }));
+                    console.error('Whisper API 에러:', {
+                        status: response.status,
+                        statusText: response.statusText,
+                        response: responseText
+                    });
+                    
+                    let errorData;
+                    try {
+                        errorData = JSON.parse(responseText);
+                    } catch {
+                        errorData = { error: { message: responseText } };
+                    }
+                    
+                    // 파일 형식 에러 특별 처리
+                    if (errorData.error?.message?.includes('Invalid file format')) {
+                        throw new Error(`파일 형식 오류: M4A 파일이 올바르게 인식되지 않았습니다. 파일을 MP3로 변환하거나 다른 파일을 시도해주세요.\n\n원본 에러: ${errorData.error.message}`);
+                    }
+                    
                     throw new Error(errorData.error?.message || `API 호출 실패 (${response.status})`);
                 }
 
-                const data = await response.json();
+                const data = JSON.parse(responseText);
+                console.log('Whisper API 성공:', {
+                    textLength: data.text?.length,
+                    duration: data.duration,
+                    language: data.language
+                });
+                
                 return data.text;
 
             } catch (error) {
+                console.error('Whisper API 호출 실패:', error);
+                
                 if (error.message.includes('quota')) {
                     throw new Error('API 사용량 한도 초과. 잠시 후 다시 시도해주세요.');
                 } else if (error.message.includes('401')) {
                     throw new Error('OpenAI API 키가 올바르지 않습니다.');
-                } else if (error.message.includes('400')) {
-                    throw new Error('지원하지 않는 오디오 형식입니다. MP3, M4A, WAV, WebM 파일을 사용해주세요.');
+                } else if (error.message.includes('413')) {
+                    throw new Error('파일이 너무 큽니다. 압축 기능을 사용하거나 더 작은 파일을 업로드해주세요.');
+                } else if (error.message.includes('400') || error.message.includes('Invalid file format')) {
+                    // M4A 파일 문제일 가능성이 높음
+                    throw new Error('파일 형식 오류: M4A 파일이 손상되었거나 코덱이 지원되지 않을 수 있습니다. 파일을 다시 인코딩하거나 MP3로 변환해보세요.');
                 }
                 throw error;
             }
