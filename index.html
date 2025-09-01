@@ -145,6 +145,12 @@
 
             try {
                 if (audioBlob.size > MAX_SIZE) {
+                    const proceed = confirm(`파일 크기가 25MB를 초과했습니다. (${(audioBlob.size / 1024 / 1024).toFixed(2)}MB)\n\n브라우저에서 파일을 자동으로 분할하여 처리합니다. 이 작업은 시간이 매우 오래 걸릴 수 있습니다. 계속하시겠습니까?`);
+                    if (!proceed) {
+                        updateStatus('대용량 파일 처리가 취소되었습니다.');
+                        fileUploader.value = '';
+                        return;
+                    }
                     fullTranscript = await processLargeAudio(audioBlob);
                 } else {
                     fullTranscript = await transcribeWithWhisper(audioBlob, fileName);
@@ -224,18 +230,90 @@
             let loaderHtml = showLoader ? '<div class="loader"></div>' : '';
             statusEl.innerHTML = `${loaderHtml}<span>${message}</span>`;
         }
-        function startTimer() { /* ... */ } // 내용은 이전과 동일하므로 생략
-        function stopTimer() { /* ... */ } // 내용은 이전과 동일하므로 생략
-        function copySummary() { /* ... */ } // 내용은 이전과 동일하므로 생략
-        function shareSummary() { /* ... */ } // 내용은 이전과 동일하므로 생략
-        function audioBufferToWav(buffer) { /* ... */ } // 내용은 이전과 동일하므로 생략
+        
+        function startTimer() {
+            seconds = 0;
+            timerEl.textContent = "00:00";
+            timerInterval = setInterval(() => {
+                seconds++;
+                const min = String(Math.floor(seconds / 60)).padStart(2, '0');
+                const sec = String(seconds % 60).padStart(2, '0');
+                timerEl.textContent = `${min}:${sec}`;
+            }, 1000);
+        }
+        
+        function stopTimer() {
+            clearInterval(timerInterval);
+            seconds = 0;
+            timerEl.textContent = "00:00";
+        }
 
-        // 생략된 함수들의 전체 코드
-        function startTimer() { seconds = 0; timerEl.textContent = "00:00"; timerInterval = setInterval(() => { seconds++; const min = String(Math.floor(seconds / 60)).padStart(2, '0'); const sec = String(seconds % 60).padStart(2, '0'); timerEl.textContent = `${min}:${sec}`; }, 1000); }
-        function stopTimer() { clearInterval(timerInterval); seconds = 0; timerEl.textContent = "00:00"; }
-        function copySummary() { navigator.clipboard.writeText(resultEl.innerText).then(() => alert("요약 내용이 복사되었습니다!")).catch(() => alert("복사에 실패했습니다.")); }
-        function shareSummary() { if (navigator.share) { navigator.share({ title: 'AI 회의록 요약', text: resultEl.innerText }); } else { alert("이 브라우저에서는 공유하기 기능을 지원하지 않습니다."); } }
-        function audioBufferToWav(aBuffer) { let numOfChan = aBuffer.numberOfChannels, len = aBuffer.length * numOfChan * 2 + 44, buffer = new ArrayBuffer(len), view = new DataView(buffer), channels = [], i, sample, offset = 0, pos = 0; setUint32(0x46464952); setUint32(len - 8); setUint32(0x45564157); setUint32(0x20746d66); setUint32(16); setUint16(1); setUint16(numOfChan); setUint32(aBuffer.sampleRate); setUint32(aBuffer.sampleRate * 2 * numOfChan); setUint16(numOfChan * 2); setUint16(16); setUint32(0x61746164); setUint32(len - pos - 4); for (i = 0; i < aBuffer.numberOfChannels; i++) channels.push(aBuffer.getChannelData(i)); while (pos < len) { for (i = 0; i < numOfChan; i++) { sample = Math.max(-1, Math.min(1, channels[i][offset])); sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767) | 0; view.setInt16(pos, sample, true); pos += 2; } offset++; } return new Blob([view], { type: "audio/wav" }); function setUint16(data) { view.setUint16(pos, data, true); pos += 2; } function setUint32(data) { view.setUint32(pos, data, true); pos += 4; } }
+        function copySummary() {
+            navigator.clipboard.writeText(resultEl.innerText).then(() => {
+                alert("요약 내용이 복사되었습니다!");
+            }).catch(() => {
+                alert("복사에 실패했습니다.");
+            });
+        }
+        
+        function shareSummary() {
+            if (navigator.share) {
+                navigator.share({ title: 'AI 회의록 요약', text: resultEl.innerText });
+            } else {
+                alert("이 브라우저에서는 공유하기 기능을 지원하지 않습니다.");
+            }
+        }
+
+        function audioBufferToWav(aBuffer) {
+            let numOfChan = aBuffer.numberOfChannels,
+                len = aBuffer.length * numOfChan * 2 + 44,
+                buffer = new ArrayBuffer(len),
+                view = new DataView(buffer),
+                channels = [],
+                i, sample,
+                offset = 0,
+                pos = 0;
+
+            setUint32(0x46464952); // "RIFF"
+            setUint32(len - 8); // file length - 8
+            setUint32(0x45564157); // "WAVE"
+
+            setUint32(0x20746d66); // "fmt " chunk
+            setUint32(16); // length = 16
+            setUint16(1); // PCM (uncompressed)
+            setUint16(numOfChan);
+            setUint32(aBuffer.sampleRate);
+            setUint32(aBuffer.sampleRate * 2 * numOfChan); // avg. bytes/sec
+            setUint16(numOfChan * 2); // block-align
+            setUint16(16); // 16-bit
+
+            setUint32(0x61746164); // "data" - chunk
+            setUint32(len - pos - 4); // data length
+
+            for (i = 0; i < aBuffer.numberOfChannels; i++)
+                channels.push(aBuffer.getChannelData(i));
+
+            while (pos < len) {
+                for (i = 0; i < numOfChan; i++) {
+                    sample = Math.max(-1, Math.min(1, channels[i][offset]));
+                    sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767) | 0;
+                    view.setInt16(pos, sample, true);
+                    pos += 2;
+                }
+                offset++;
+            }
+            return new Blob([view], { type: "audio/wav" });
+
+            function setUint16(data) {
+                view.setUint16(pos, data, true);
+                pos += 2;
+            }
+
+            function setUint32(data) {
+                view.setUint32(pos, data, true);
+                pos += 4;
+            }
+        }
     </script>
 </body>
 </html>
