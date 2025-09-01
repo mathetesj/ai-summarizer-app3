@@ -135,7 +135,8 @@
                     aria-label="오디오 파일 선택">
                 <p class="text-xs text-gray-500 mt-2">
                     지원: MP3, M4A, WAV, WebM, MP4, OGG, FLAC<br>
-                    <span class="text-green-600 font-semibold">✨ 25MB 이상 파일도 자동 압축/분할 처리됩니다</span>
+                    <span class="text-green-600 font-semibold">✨ 25MB 이상 파일도 자동 압축/분할 처리</span><br>
+                    <span class="text-blue-600 font-semibold">🔄 M4A 파일은 자동으로 변환 옵션 제공</span>
                 </p>
             </div>
         </div>
@@ -474,29 +475,200 @@
 
             currentFileName = file.name;
             
-            // M4A 및 기타 형식 처리
+            // M4A 파일 특별 처리
             if (file.name.toLowerCase().endsWith('.m4a') || 
                 file.type === 'audio/x-m4a' || 
                 file.type === 'audio/mp4' ||
-                file.type === 'audio/mpeg' ||
-                file.type === 'video/mp4') {
+                file.type === 'audio/m4a' ||
+                file.type === '') {  // 빈 MIME 타입도 처리
                 
-                updateStatus(`⏳ ${sizeMB}MB 파일 처리 중...`, true);
+                updateStatus(`⏳ M4A 파일 감지 (${sizeMB}MB) - 처리 중...`, true);
                 
-                try {
-                    await processAudio(file, currentFileName);
-                } catch (error) {
-                    console.error('파일 처리 실패:', error);
-                    updateStatus(`❌ 파일 처리 실패: ${error.message}`);
-                } finally {
-                    // 처리 완료 후 경고 제거
-                    window.onbeforeunload = null;
+                // M4A 처리 옵션 제공
+                const convertOption = confirm(
+                    `🎵 M4A 파일 처리 옵션\n\n` +
+                    `파일: ${file.name} (${sizeMB}MB)\n\n` +
+                    `일부 M4A 파일(특히 핸드폰 녹음)은 특수 코덱을 사용하여 직접 처리가 어려울 수 있습니다.\n\n` +
+                    `[확인] - 브라우저에서 MP3로 변환 후 처리 (권장)\n` +
+                    `[취소] - 원본 M4A 파일로 시도\n\n` +
+                    `MP3 변환을 추천합니다. 변환하시겠습니까?`
+                );
+                
+                if (convertOption) {
+                    // MP3로 변환
+                    try {
+                        updateStatus('🔄 M4A → MP3 변환 중... (시간이 걸릴 수 있습니다)', true);
+                        const mp3Blob = await convertM4AToMP3(file);
+                        currentFileName = file.name.replace('.m4a', '.mp3');
+                        await processAudio(mp3Blob, currentFileName);
+                    } catch (error) {
+                        console.error('변환 실패:', error);
+                        
+                        // 변환 실패 시 원본으로 재시도
+                        if (confirm('MP3 변환에 실패했습니다. 원본 M4A 파일로 시도하시겠습니까?')) {
+                            await processAudio(file, currentFileName);
+                        } else {
+                            updateStatus('❌ 파일 처리가 취소되었습니다.');
+                        }
+                    }
+                } else {
+                    // 원본 M4A로 시도
+                    try {
+                        await processAudio(file, currentFileName);
+                    } catch (error) {
+                        console.error('M4A 처리 실패:', error);
+                        
+                        // 실패 시 MP3 변환 재제안
+                        if (error.message.includes('Invalid file format') || 
+                            error.message.includes('파일 형식 오류')) {
+                            
+                            if (confirm('M4A 파일 처리에 실패했습니다.\n\nMP3로 변환하여 다시 시도하시겠습니까?')) {
+                                updateStatus('🔄 M4A → MP3 변환 중...', true);
+                                try {
+                                    const mp3Blob = await convertM4AToMP3(file);
+                                    currentFileName = file.name.replace('.m4a', '.mp3');
+                                    await processAudio(mp3Blob, currentFileName);
+                                } catch (convError) {
+                                    updateStatus(`❌ 변환 실패: ${convError.message}`);
+                                }
+                            }
+                        } else {
+                            updateStatus(`❌ 처리 실패: ${error.message}`);
+                        }
+                    }
                 }
+                
+                window.onbeforeunload = null;
             } else {
                 // 기타 오디오 형식 직접 처리
                 await processAudio(file, currentFileName);
                 window.onbeforeunload = null;
             }
+        }
+
+        // ========== M4A to MP3 변환 ==========
+        async function convertM4AToMP3(m4aFile) {
+            return new Promise(async (resolve, reject) => {
+                try {
+                    showProgress(10, 'M4A 파일 디코딩 중...');
+                    
+                    // AudioContext 사용
+                    const audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                        sampleRate: 44100  // 표준 샘플레이트
+                    });
+                    
+                    // M4A 파일 읽기
+                    const arrayBuffer = await m4aFile.arrayBuffer();
+                    
+                    let audioBuffer;
+                    try {
+                        // 디코딩 시도
+                        audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                        console.log('M4A 디코딩 성공:', {
+                            duration: audioBuffer.duration,
+                            sampleRate: audioBuffer.sampleRate,
+                            channels: audioBuffer.numberOfChannels
+                        });
+                    } catch (decodeError) {
+                        console.error('표준 디코딩 실패, 대체 방법 시도:', decodeError);
+                        
+                        // 대체 디코딩 방법
+                        const audioElement = new Audio();
+                        audioElement.src = URL.createObjectURL(m4aFile);
+                        
+                        await new Promise((res, rej) => {
+                            audioElement.addEventListener('loadedmetadata', res);
+                            audioElement.addEventListener('error', rej);
+                        });
+                        
+                        // MediaElementAudioSourceNode 사용
+                        const source = audioContext.createMediaElementSource(audioElement);
+                        const destination = audioContext.createMediaStreamDestination();
+                        source.connect(destination);
+                        
+                        // 스트림에서 오디오 데이터 캡처
+                        const mediaRecorder = new MediaRecorder(destination.stream, {
+                            mimeType: 'audio/webm;codecs=opus'
+                        });
+                        
+                        const chunks = [];
+                        mediaRecorder.ondataavailable = e => chunks.push(e.data);
+                        
+                        return new Promise((res, rej) => {
+                            mediaRecorder.onstop = () => {
+                                const webmBlob = new Blob(chunks, { type: 'audio/webm' });
+                                res(webmBlob);
+                            };
+                            
+                            mediaRecorder.start();
+                            audioElement.play();
+                            
+                            audioElement.onended = () => {
+                                mediaRecorder.stop();
+                                URL.revokeObjectURL(audioElement.src);
+                            };
+                        });
+                    }
+                    
+                    showProgress(40, 'WAV 형식으로 변환 중...');
+                    
+                    // WAV로 변환 (MP3 인코더가 없으므로 WAV 사용)
+                    // Whisper API는 WAV도 잘 처리함
+                    const wavBlob = audioBufferToWav(audioBuffer, audioBuffer.sampleRate);
+                    
+                    // WAV 파일 크기 체크
+                    const wavSizeMB = (wavBlob.size / 1024 / 1024).toFixed(2);
+                    console.log(`변환 완료: M4A (${(m4aFile.size / 1024 / 1024).toFixed(2)}MB) → WAV (${wavSizeMB}MB)`);
+                    
+                    showProgress(60, '변환 완료!');
+                    
+                    // WAV는 크기가 크므로 압축 권장
+                    if (wavBlob.size > 25 * 1024 * 1024) {
+                        updateStatus('📦 변환된 파일이 25MB를 초과하여 압축 중...', true);
+                        
+                        // 16kHz, 모노로 다운샘플링
+                        const compressedBuffer = await compressAudioBuffer(audioBuffer);
+                        const compressedWav = audioBufferToWav(compressedBuffer, 16000);
+                        
+                        console.log(`압축 완료: ${wavSizeMB}MB → ${(compressedWav.size / 1024 / 1024).toFixed(2)}MB`);
+                        resolve(compressedWav);
+                    } else {
+                        resolve(wavBlob);
+                    }
+                    
+                } catch (error) {
+                    console.error('M4A 변환 실패:', error);
+                    reject(new Error('M4A 파일을 변환할 수 없습니다. 파일이 손상되었거나 지원하지 않는 코덱을 사용합니다.'));
+                }
+            });
+        }
+
+        // ========== 오디오 버퍼 압축 ==========
+        async function compressAudioBuffer(audioBuffer) {
+            const targetSampleRate = 16000; // Whisper 최적
+            const channels = 1; // 모노
+            
+            // OfflineAudioContext로 다운샘플링
+            const offlineContext = new OfflineAudioContext(
+                channels,
+                Math.floor(audioBuffer.duration * targetSampleRate),
+                targetSampleRate
+            );
+            
+            const source = offlineContext.createBufferSource();
+            source.buffer = audioBuffer;
+            
+            // 다이나믹 압축
+            const compressor = offlineContext.createDynamicsCompressor();
+            compressor.threshold.value = -24;
+            compressor.knee.value = 30;
+            compressor.ratio.value = 12;
+            
+            source.connect(compressor);
+            compressor.connect(offlineContext.destination);
+            source.start(0);
+            
+            return await offlineContext.startRendering();
         }
 
         // ========== 오디오 처리 ==========
