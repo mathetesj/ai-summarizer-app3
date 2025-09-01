@@ -5,6 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI 회의록 요약</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- PDF 생성을 위한 라이브러리 추가 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
     <style>
         @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); } 70% { box-shadow: 0 0 0 15px rgba(239, 68, 68, 0); } 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); } }
         .recording { animation: pulse 1.5s infinite; }
@@ -61,6 +64,8 @@
             <div class="mt-4 flex justify-center gap-4">
                 <button id="copyBtn" class="bg-gray-500 text-white px-4 py-2 rounded-lg hover:bg-gray-600">본문 복사</button>
                 <button id="shareBtn" class="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600">공유하기</button>
+                <!-- PDF 다운로드 버튼 추가 -->
+                <button id="pdfBtn" class="bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700">PDF 다운로드</button>
             </div>
         </div>
     </div>
@@ -77,9 +82,11 @@
         const resultEl = document.getElementById('result');
         const copyBtn = document.getElementById('copyBtn');
         const shareBtn = document.getElementById('shareBtn');
+        const pdfBtn = document.getElementById('pdfBtn'); // PDF 버튼 요소 추가
         const openaiSavedEl = document.getElementById('openai_saved');
         const googleSavedEl = document.getElementById('google_saved');
         let mediaRecorder, audioChunks = [], isRecording = false, timerInterval, seconds = 0;
+        let currentFileName = ''; // PDF 파일명을 위한 전역 변수
 
         // --- 이벤트 리스너 ---
         window.addEventListener('DOMContentLoaded', loadApiKeys);
@@ -89,77 +96,37 @@
         fileUploader.addEventListener('change', handleFileUpload);
         copyBtn.addEventListener('click', copySummary);
         shareBtn.addEventListener('click', shareSummary);
+        pdfBtn.addEventListener('click', downloadPdf); // PDF 다운로드 이벤트 리스너 추가
 
         // --- API 키 관리 ---
-        function loadApiKeys() {
-            console.log("페이지 로드: 저장된 API 키를 불러옵니다.");
-            openaiKeyEl.value = localStorage.getItem('openaiApiKey') || '';
-            googleKeyEl.value = localStorage.getItem('googleApiKey') || '';
-        }
-        function saveApiKey(keyName, value, indicatorEl) {
-            localStorage.setItem(keyName, value);
-            indicatorEl.style.opacity = '1';
-            setTimeout(() => { indicatorEl.style.opacity = '0'; }, 2000);
-        }
-        function checkApiKeys() {
-            if (!openaiKeyEl.value || !googleKeyEl.value) {
-                alert('API 키를 먼저 입력해주세요!');
-                return false;
-            }
-            return true;
-        }
+        function loadApiKeys() { /* ... */ }
+        function saveApiKey(keyName, value, indicatorEl) { /* ... */ }
+        function checkApiKeys() { /* ... */ }
 
         // --- 녹음 관리 ---
-        async function handleRecord() {
-            console.log("녹음 버튼 클릭됨");
-            if (!checkApiKeys()) return;
-            if (!isRecording) {
-                try {
-                    console.log("녹음 시작을 시도합니다.");
-                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                    mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-                    mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
-                    mediaRecorder.onstop = () => processAudio(new Blob(audioChunks, { type: 'audio/webm' }), 'recording.webm');
-                    mediaRecorder.start();
-                    
-                    recordBtn.classList.add('recording'); isRecording = true; startTimer();
-                    updateStatus('🔴 녹음 중입니다...');
-                    console.log("녹음이 시작되었습니다.");
-                } catch (err) { 
-                    updateStatus("마이크 접근 권한을 허용해주세요.");
-                    console.error("마이크 접근 오류:", err);
-                }
-            } else {
-                console.log("녹음 중지를 시도합니다.");
-                mediaRecorder.stop();
-                recordBtn.classList.remove('recording'); isRecording = false; stopTimer();
-                console.log("녹음이 중지되었습니다.");
-            }
-        }
+        async function handleRecord() { /* ... */ }
         
         // --- 파일 업로드 관리 ---
         function handleFileUpload(event) {
-            console.log("파일이 선택되었습니다.");
-            if (!checkApiKeys()) { event.target.value = ''; return; }
+             if (!checkApiKeys()) { event.target.value = ''; return; }
             const file = event.target.files[0];
             if (file) {
-                console.log(`선택된 파일: ${file.name}, 크기: ${file.size} bytes`);
+                currentFileName = file.name; // 파일명 저장
                 processAudio(file, file.name);
             }
         }
 
         // --- 핵심 오디오 처리 로직 ---
         async function processAudio(audioBlob, fileName) {
-            console.log("processAudio 함수 시작");
             updateStatus('⏳ 오디오 파일을 처리 중입니다...', true);
             resultContainerEl.classList.add('hidden');
+            currentFileName = fileName; // 파일명 업데이트
             
             const MAX_SIZE = 25 * 1024 * 1024;
             let fullTranscript = "";
 
             try {
                 if (audioBlob.size > MAX_SIZE) {
-                    console.log("대용량 파일 처리 로직 시작");
                     const proceed = confirm(`파일 크기가 25MB를 초과했습니다. (${(audioBlob.size / 1024 / 1024).toFixed(2)}MB)\n\n브라우저에서 파일을 자동으로 분할하여 처리합니다. 이 작업은 시간이 매우 오래 걸릴 수 있습니다. 계속하시겠습니까?`);
                     if (!proceed) {
                         updateStatus('대용량 파일 처리가 취소되었습니다.');
@@ -168,104 +135,97 @@
                     }
                     fullTranscript = await processLargeAudio(audioBlob);
                 } else {
-                    console.log("일반 파일 처리 로직 시작");
                     fullTranscript = await transcribeWithWhisper(audioBlob, fileName);
                 }
 
-                console.log("텍스트 요약 로직 시작");
                 updateStatus('⏳ Gemini AI가 텍스트를 요약 중...', true);
                 const summary = await summarizeWithGemini(fullTranscript);
 
-                console.log("결과 표시 로직 시작");
                 resultEl.innerText = summary;
                 resultContainerEl.classList.remove('hidden');
                 updateStatus('✅ 요약이 완료되었습니다!');
             } catch (error) {
                 updateStatus(`❌ 오류: ${error.message}`);
-                console.error("처리 중 심각한 오류 발생:", error); // ✨오류를 콘솔에 상세히 기록
             } finally {
-                fileUploader.value = ''; // 파일 선택 초기화
+                fileUploader.value = '';
             }
         }
         
-        async function processLargeAudio(audioBlob) {
-            // ... (이하 코드는 이전과 동일)
-        }
+        async function processLargeAudio(audioBlob) { /* ... */ }
 
         // --- API 호출 함수 ---
-        async function transcribeWithWhisper(audioBlob, fileName) {
-            console.log("Whisper API 호출 시작");
-            const formData = new FormData();
-            formData.append('file', audioBlob, fileName);
-            formData.append('model', 'whisper-1');
-            const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-                method: 'POST',
-                headers: { 'Authorization': `Bearer ${openaiKeyEl.value}` },
-                body: formData
-            });
-            const data = await response.json();
-            if (!response.ok) {
-                console.error("Whisper API 오류 응답:", data);
-                throw new Error(data.error?.message || 'Whisper API 호출 실패');
-            }
-            console.log("Whisper API 호출 성공");
-            return data.text;
-        }
-        async function summarizeWithGemini(transcript) {
-            console.log("Gemini API 호출 시작");
-            const prompt = `다음 회의록 텍스트를 아래 형식에 맞춰 Markdown 양식으로 멋지게 요약해 주세요.\n\n[회의록 텍스트]\n${transcript}\n\n[요약 형식]\n### 📌 핵심 요약\n\n### 📝 상세 내용\n- \n\n### 🚀 Action Items\n- `;
-            const body = { contents: [{ parts: [{ text: prompt }] }] };
-            const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${googleKeyEl.value}`, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
-            });
-            const data = await response.json();
-            if (!response.ok) {
-                console.error("Gemini API 오류 응답:", data);
-                throw new Error(data.error?.message || 'Gemini API 호출 실패');
-            }
-            console.log("Gemini API 호출 성공");
-            return data.candidates[0].content.parts[0].text;
-        }
+        async function transcribeWithWhisper(audioBlob, fileName) { /* ... */ }
+        async function summarizeWithGemini(transcript) { /* ... */ }
 
-        // --- 유틸리티 함수 (생략된 부분 포함) ---
+        // --- PDF 다운로드 기능 ---
+        function downloadPdf() {
+            const { jsPDF } = window.jspdf;
+            const summaryContent = resultEl;
+            const statusText = statusEl.textContent;
+            updateStatus('⏳ PDF 생성 중...', true);
+
+            html2canvas(summaryContent, {
+                scale: 2, // 해상도 향상
+                useCORS: true,
+                backgroundColor: '#f8f9fa'
+            }).then(canvas => {
+                const imgData = canvas.toDataURL('image/png');
+                const pdf = new jsPDF({
+                    orientation: 'portrait',
+                    unit: 'mm',
+                    format: 'a4'
+                });
+
+                const pdfWidth = pdf.internal.pageSize.getWidth();
+                const pdfHeight = pdf.internal.pageSize.getHeight();
+                const margin = 15;
+                const contentWidth = pdfWidth - (margin * 2);
+
+                const imgProps= pdf.getImageProperties(imgData);
+                const imgHeight = (imgProps.height * contentWidth) / imgProps.width;
+                let heightLeft = imgHeight;
+                let position = margin;
+
+                // 제목 추가
+                pdf.setFontSize(18);
+                pdf.text("AI 회의록 요약", pdfWidth / 2, margin, { align: 'center' });
+                
+                // 첫 페이지 추가
+                pdf.addImage(imgData, 'PNG', margin, position + 5, contentWidth, imgHeight);
+                heightLeft -= (pdfHeight - margin - 5);
+
+                // 내용이 길 경우 여러 페이지에 걸쳐 추가
+                while (heightLeft > 0) {
+                    position = heightLeft - imgHeight;
+                    pdf.addPage();
+                    pdf.addImage(imgData, 'PNG', margin, position + margin, contentWidth, imgHeight);
+                    heightLeft -= pdfHeight;
+                }
+                
+                const safeFileName = currentFileName.replace(/[^a-zA-Z0-9]/g, '_').replace(/\.[^/.]+$/, "");
+                pdf.save(`${safeFileName}_summary.pdf`);
+
+                updateStatus(statusText);
+            }).catch(error => {
+                console.error("PDF 생성 오류:", error);
+                updateStatus('❌ PDF 생성에 실패했습니다.');
+            });
+        }
+        
+        // --- 유틸리티 함수 (생략된 부분 전체 코드) ---
+        function loadApiKeys() { openaiKeyEl.value = localStorage.getItem('openaiApiKey') || ''; googleKeyEl.value = localStorage.getItem('googleApiKey') || ''; }
+        function saveApiKey(keyName, value, indicatorEl) { localStorage.setItem(keyName, value); indicatorEl.style.opacity = '1'; setTimeout(() => { indicatorEl.style.opacity = '0'; }, 2000); }
+        function checkApiKeys() { if (!openaiKeyEl.value || !googleKeyEl.value) { alert('API 키를 먼저 입력해주세요!'); return false; } return true; }
+        async function handleRecord() { if (!checkApiKeys()) return; if (!isRecording) { try { const stream = await navigator.mediaDevices.getUserMedia({ audio: true }); mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' }); mediaRecorder.ondataavailable = e => audioChunks.push(e.data); mediaRecorder.onstop = () => { currentFileName = 'recording.webm'; processAudio(new Blob(audioChunks, { type: 'audio/webm' }), 'recording.webm'); }; mediaRecorder.start(); recordBtn.classList.add('recording'); isRecording = true; startTimer(); updateStatus('🔴 녹음 중입니다...'); } catch (err) { updateStatus("마이크 접근 권한을 허용해주세요."); } } else { mediaRecorder.stop(); recordBtn.classList.remove('recording'); isRecording = false; stopTimer(); } }
+        async function processLargeAudio(audioBlob) { updateStatus('⏳ 대용량 오디오 파일을 디코딩 중...', true); const audioContext = new (window.AudioContext || window.webkitAudioContext)(); const audioBuffer = await audioContext.decodeAudioData(await audioBlob.arrayBuffer()); const MAX_CHUNK_BYTES = 24 * 1024 * 1024; const duration = audioBuffer.duration; const numChannels = audioBuffer.numberOfChannels; const sampleRate = audioBuffer.sampleRate; const bytesPerSample = 2; const totalBytes = duration * sampleRate * numChannels * bytesPerSample; const numChunks = Math.ceil(totalBytes / MAX_CHUNK_BYTES); const chunkDuration = duration / numChunks; let combinedTranscript = ""; for (let i = 0; i < numChunks; i++) { updateStatus(`⏳ 오디오 조각 처리 중... (${i + 1}/${numChunks})`, true); const startOffset = Math.floor(i * chunkDuration * sampleRate); const endOffset = Math.floor((i + 1) * chunkDuration * sampleRate); const chunkBuffer = audioContext.createBuffer(numChannels, endOffset - startOffset, sampleRate); for (let channel = 0; channel < numChannels; channel++) { chunkBuffer.copyToChannel(audioBuffer.getChannelData(channel).slice(startOffset, endOffset), channel); } const chunkWavBlob = audioBufferToWav(chunkBuffer); const chunkTranscript = await transcribeWithWhisper(chunkWavBlob, `chunk_${i}.wav`); combinedTranscript += chunkTranscript + " "; } return combinedTranscript; }
+        async function transcribeWithWhisper(audioBlob, fileName) { const formData = new FormData(); formData.append('file', audioBlob, fileName); formData.append('model', 'whisper-1'); const response = await fetch('https://api.openai.com/v1/audio/transcriptions', { method: 'POST', headers: { 'Authorization': `Bearer ${openaiKeyEl.value}` }, body: formData }); const data = await response.json(); if (!response.ok) throw new Error(data.error?.message || 'Whisper API 호출 실패'); return data.text; }
+        async function summarizeWithGemini(transcript) { const prompt = `다음 회의록 텍스트를 아래 형식에 맞춰 Markdown 양식으로 멋지게 요약해 주세요.\n\n[회의록 텍스트]\n${transcript}\n\n[요약 형식]\n### 📌 핵심 요약\n\n### 📝 상세 내용\n- \n\n### 🚀 Action Items\n- `; const body = { contents: [{ parts: [{ text: prompt }] }] }; const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${googleKeyEl.value}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); const data = await response.json(); if (!response.ok) throw new Error(data.error?.message || 'Gemini API 호출 실패'); return data.candidates[0].content.parts[0].text; }
         function updateStatus(message, showLoader = false) { let loaderHtml = showLoader ? '<div class="loader"></div>' : ''; statusEl.innerHTML = `${loaderHtml}<span>${message}</span>`; }
         function startTimer() { seconds = 0; timerEl.textContent = "00:00"; timerInterval = setInterval(() => { seconds++; const min = String(Math.floor(seconds / 60)).padStart(2, '0'); const sec = String(seconds % 60).padStart(2, '0'); timerEl.textContent = `${min}:${sec}`; }, 1000); }
         function stopTimer() { clearInterval(timerInterval); seconds = 0; timerEl.textContent = "00:00"; }
         function copySummary() { navigator.clipboard.writeText(resultEl.innerText).then(() => alert("요약 내용이 복사되었습니다!")).catch(() => alert("복사에 실패했습니다.")); }
         function shareSummary() { if (navigator.share) { navigator.share({ title: 'AI 회의록 요약', text: resultEl.innerText }); } else { alert("이 브라우저에서는 공유하기 기능을 지원하지 않습니다."); } }
         function audioBufferToWav(aBuffer) { let numOfChan = aBuffer.numberOfChannels, len = aBuffer.length * numOfChan * 2 + 44, buffer = new ArrayBuffer(len), view = new DataView(buffer), channels = [], i, sample, offset = 0, pos = 0; setUint32(0x46464952); setUint32(len - 8); setUint32(0x45564157); setUint32(0x20746d66); setUint32(16); setUint16(1); setUint16(numOfChan); setUint32(aBuffer.sampleRate); setUint32(aBuffer.sampleRate * 2 * numOfChan); setUint16(numOfChan * 2); setUint16(16); setUint32(0x61746164); setUint32(len - pos - 4); for (i = 0; i < aBuffer.numberOfChannels; i++) channels.push(aBuffer.getChannelData(i)); while (pos < len) { for (i = 0; i < numOfChan; i++) { sample = Math.max(-1, Math.min(1, channels[i][offset])); sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767) | 0; view.setInt16(pos, sample, true); pos += 2; } offset++; } return new Blob([view], { type: "audio/wav" }); function setUint16(data) { view.setUint16(pos, data, true); pos += 2; } function setUint32(data) { view.setUint32(pos, data, true); pos += 4; } }
-        
-        // ✨ processLargeAudio 함수의 전체 코드를 여기에 붙여넣습니다.
-        async function processLargeAudio(audioBlob) {
-            updateStatus('⏳ 대용량 오디오 파일을 디코딩 중...', true);
-            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            const audioBuffer = await audioContext.decodeAudioData(await audioBlob.arrayBuffer());
-            const MAX_CHUNK_BYTES = 24 * 1024 * 1024;
-            const duration = audioBuffer.duration;
-            const numChannels = audioBuffer.numberOfChannels;
-            const sampleRate = audioBuffer.sampleRate;
-            const bytesPerSample = 2; // 16-bit PCM
-            const totalBytes = duration * sampleRate * numChannels * bytesPerSample;
-            const numChunks = Math.ceil(totalBytes / MAX_CHUNK_BYTES);
-            const chunkDuration = duration / numChunks;
-            let combinedTranscript = "";
-
-            for (let i = 0; i < numChunks; i++) {
-                updateStatus(`⏳ 오디오 조각 처리 중... (${i + 1}/${numChunks})`, true);
-                const startOffset = Math.floor(i * chunkDuration * sampleRate);
-                const endOffset = Math.floor((i + 1) * chunkDuration * sampleRate);
-                const chunkBuffer = audioContext.createBuffer(numChannels, endOffset - startOffset, sampleRate);
-
-                for (let channel = 0; channel < numChannels; channel++) {
-                    chunkBuffer.copyToChannel(audioBuffer.getChannelData(channel).slice(startOffset, endOffset), channel);
-                }
-                
-                const chunkWavBlob = audioBufferToWav(chunkBuffer);
-                const chunkTranscript = await transcribeWithWhisper(chunkWavBlob, `chunk_${i}.wav`);
-                combinedTranscript += chunkTranscript + " ";
-            }
-            return combinedTranscript;
-        }
     </script>
 </body>
 </html>
